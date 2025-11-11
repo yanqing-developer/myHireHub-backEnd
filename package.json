@@ -20,7 +20,7 @@
     "format": "prettier --write .",
     "test": "vitest run",
     "test:watch": "vitest",
-    "postinstall": "npx prisma generate && npm run prisma:migrate:deploy"
+    "postinstall": "npx prisma generate"
   },
 
 
