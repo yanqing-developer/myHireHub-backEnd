@@ -10,6 +10,7 @@
     "start": "node dist/index.js",
     "prisma:dev": "prisma migrate dev",
     "prisma:gen": "prisma generate",
+    "prisma:migrate:deploy": "prisma migrate deploy",  
 
 
     "prisma:seed": "prisma db seed", 
