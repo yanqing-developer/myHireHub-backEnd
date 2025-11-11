@@ -3,12 +3,18 @@ name: Deploy Backend to Render
 on:
   push:
     branches: [ "main" ]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-backend
+  cancel-in-progress: true
 
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     env:
-      
       PRISMA_HIDE_UPDATE_MESSAGE: "true"
       TZ: Europe/Berlin
 
@@ -27,8 +33,26 @@ jobs:
       - name: Build project
         run: npm run build
 
-     
-      - name: Trigger Render deploy
+      # 校验并清洗 Render Deploy Hook，避免换行/空格/错误值
+      - name: Validate Render deploy hook
         env:
           RENDER_DEPLOY_HOOK_URL: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
-        run: curl -sSf -X POST "$RENDER_DEPLOY_HOOK_URL"
+        run: |
+          if [ -z "${RENDER_DEPLOY_HOOK_URL}" ]; then
+            echo "❌ Missing secret: RENDER_DEPLOY_HOOK_URL"
+            exit 1
+          fi
+          CLEANED=$(printf "%s" "$RENDER_DEPLOY_HOOK_URL" | tr -d '\r' | tr -d '\n' | xargs)
+          if ! printf "%s" "$CLEANED" | grep -Eq '^https://api\.render\.com/deploy/'; then
+            echo "❌ Secret RENDER_DEPLOY_HOOK_URL is not a valid Render deploy hook URL."
+            exit 1
+          fi
+          echo "CLEANED_URL=$CLEANED" >> $GITHUB_ENV
+          echo "✅ Render hook looks valid."
+
+      - name: Trigger Render deploy
+        env:
+          CLEANED_URL: ${{ env.CLEANED_URL }}
+        run: |
+          curl --fail --silent --show-error -X POST "$CLEANED_URL"
+          echo "✅ Render deploy triggered."
