@@ -7,6 +7,13 @@ on:
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
+    env:
+     
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      DIRECT_URL: ${{ secrets.DIRECT_URL }}
+      
+      PRISMA_HIDE_UPDATE_MESSAGE: "true"
+      TZ: Europe/Berlin
 
     steps:
       - name: Checkout repository
@@ -20,16 +27,14 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+     
       - name: Build project
         run: npm run build
 
       - name: Deploy Prisma migrations
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}  
-          DIRECT_URL: ${{ secrets.DIRECT_URL }}      
-        run: npx prisma migrate deploy
+        run: npx prisma migrate deploy --schema=prisma/schema.prisma
 
       - name: Trigger Render deploy
         env:
           RENDER_DEPLOY_HOOK_URL: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
-        run: curl -X POST "$RENDER_DEPLOY_HOOK_URL"
+        run: curl -sSf -X POST "$RENDER_DEPLOY_HOOK_URL"
