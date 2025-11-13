@@ -1,11 +1,9 @@
-import { Router, Request, Response, NextFunction } from "express";
+import { Router } from "express";
 import {
   PrismaClient,
-  Prisma,
   ApplicationStatus,
   Role,
 } from "@prisma/client";
-
 import { z } from "zod";
 import { auth, requireRole } from "../middleware/auth";
 import { recordStatusHistory } from "../utils/statusHistory";
@@ -13,13 +11,7 @@ import { recordStatusHistory } from "../utils/statusHistory";
 const prisma = new PrismaClient();
 const router = Router();
 
-function parseStatus(q?: string): ApplicationStatus | undefined {
-  if (!q) return undefined;
-  if ((Object.values(ApplicationStatus) as string[]).includes(q)) {
-    return q as ApplicationStatus;
-  }
-  return undefined;
-}
+
 
 const applySchema = z.object({
   jobId: z.number().int().positive(),
@@ -28,218 +20,287 @@ const applySchema = z.object({
 
 const updateStatusSchema = z.object({
   status: z.nativeEnum(ApplicationStatus),
-  assigneeId: z.number().int().positive().optional(),
   reason: z.string().max(1000).optional(),
 });
 
 
-router.post("/", auth, requireRole("CANDIDATE"), async (req, res, next) => {
-  try {
-    const user = (req as any).user as { id: number; role: Role };
-    const body = applySchema.parse(req.body);
+function isHrTransitionAllowed(from: ApplicationStatus, to: ApplicationStatus) {
+  if (from !== "APPLIED" && from !== "SCREENING") return false;
+  return (
+    to === "SCREENING" ||
+    to === "INTERVIEW" ||
+    to === "REJECTED"
+  );
+}
 
-    const candidate = await prisma.candidate.findUnique({
-      where: { userId: user.id },
+
+function isLeadTransitionAllowed(from: ApplicationStatus, to: ApplicationStatus) {
+  if (from !== "INTERVIEW") return false;
+  return (
+    to === "OFFER" ||
+    to === "REJECTED" ||
+    to === "SCREENING"
+  );
+}
+
+
+router.post("/", auth, requireRole("CANDIDATE"), async (req, res) => {
+  try {
+    const parsed = applySchema.parse({
+      jobId: Number(req.body.jobId),
+      reason: req.body.reason,
     });
-    if (!candidate) {
-      return res
-        .status(400)
-        .json({ error: "NO_CANDIDATE_PROFILE", message: "请先完善候选人资料" });
+
+   
+    const authUser = req.user!; 
+
+ 
+    const dbUser = await prisma.user.findUnique({
+      where: { id: authUser.id },
+    });
+
+    if (!dbUser) {
+      return res.status(400).json({ message: "User not found" });
     }
 
-    const job = await prisma.jOB.findUnique({ where: { id: body.jobId } });
-    if (!job) return res.status(404).json({ error: "JOB_NOT_FOUND" });
 
-    const app = await prisma.$transaction(async (tx) => {
-      const created = await tx.application.create({
-        data: {
-          jobId: body.jobId,
-          candidateId: candidate.id,
-          applicantUserId: user.id,
-          status: ApplicationStatus.APPLIED,
-          reason: body.reason,
-        },
-        include: {
-          job: true,
-          candidate: true,
-        },
-      });
-
-      await recordStatusHistory(tx, {
-        applicationId: created.id,
-        fromStatus: null,
-        toStatus: ApplicationStatus.APPLIED,
-        changedById: user.id,
-        reason: body.reason,
-      });
-
-      return created;
+    let candidate = await prisma.candidate.findUnique({
+      where: { userId: dbUser.id },
     });
 
-    return res.status(201).json(app);
-  } catch (e) {
-    next(e);
+
+    if (!candidate) {
+      const fallbackName =
+        dbUser.name ||
+        (dbUser.email ? dbUser.email.split("@")[0] : "Candidate");
+
+      candidate = await prisma.candidate.create({
+        data: {
+          userId: dbUser.id,
+          fullName: fallbackName,          
+          email: dbUser.email,            
+          photoUrl: dbUser.photoUrl ?? null,
+        },
+      });
+    }
+
+ 
+    const existing = await prisma.application.findFirst({
+      where: {
+        jobId: parsed.jobId,
+        candidateId: candidate.id,
+      },
+    });
+
+    if (existing) {
+      return res.status(409).json({
+        message: "You have already applied for this job.",
+      });
+    }
+
+
+    const created = await prisma.application.create({
+      data: {
+        jobId: parsed.jobId,
+        candidateId: candidate.id,
+        applicantUserId: dbUser.id,           
+        status: ApplicationStatus.APPLIED,
+        reason: parsed.reason ?? null,
+      },
+    });
+
+   
+    await recordStatusHistory(prisma, {
+      applicationId: created.id,
+      fromStatus: null,
+      toStatus: created.status,
+      changedById: authUser.id,
+      reason: parsed.reason ?? null,
+    });
+
+    return res.status(201).json(created);
+  } catch (err: any) {
+    console.error("POST /applications error", err);
+    if (err instanceof z.ZodError) {
+      return res.status(400).json({ message: err.message });
+    }
+    return res.status(500).json({ message: "Failed to create application" });
   }
 });
 
 
-async function getMyApplications(
-  req: Request,
-  res: Response,
-  next: NextFunction
-) {
+
+router.get("/me", auth, requireRole("CANDIDATE"), async (req, res) => {
   try {
-    const user = (req as any).user as { id: number; role: Role };
+    const user = req.user!;
 
     const candidate = await prisma.candidate.findUnique({
       where: { userId: user.id },
     });
+
     if (!candidate) {
-      return res.status(400).json({ error: "NO_CANDIDATE_PROFILE" });
+      return res.json([]);
     }
 
     const apps = await prisma.application.findMany({
       where: { candidateId: candidate.id },
       include: {
-        job: true,
-        assignee: true,
-        candidate: true,
+        job: {
+          select: { id: true, title: true, company: true, location: true },
+        },
       },
       orderBy: { createdAt: "desc" },
     });
 
-    return res.json(apps);
-  } catch (e) {
-    next(e);
-  }
-}
+    const result = apps.map((a) => ({
+      id: a.id,
+      status: a.status,
+      createdAt: a.createdAt,
+      job: a.job,
+    }));
 
-
-router.get("/me", auth, requireRole("CANDIDATE"), getMyApplications);
-router.get("/mine", auth, requireRole("CANDIDATE"), getMyApplications);
-
-
-router.get("/hr", auth, requireRole("HR"), async (req, res, next) => {
-  try {
-    const status = parseStatus(req.query.status as string | undefined);
-
-    const where: Prisma.ApplicationWhereInput = {};
-    if (status) where.status = status;
-
-    const apps = await prisma.application.findMany({
-      where,
-      include: {
-        job: true,
-        candidate: true,
-        assignee: true,
-      },
-      orderBy: { createdAt: "desc" },
-    });
-
-    return res.json(apps);
-  } catch (e) {
-    next(e);
+    return res.json(result);
+  } catch (err) {
+    console.error("GET /applications/me error", err);
+    return res.status(500).json({ message: "Failed to load applications" });
   }
 });
 
 
-
-router.get("/lead", auth, requireRole("LEAD"), async (req, res, next) => {
+router.get("/hr", auth, requireRole("HR"), async (_req, res) => {
   try {
-    const status = parseStatus(req.query.status as string | undefined);
-
-    const where: Prisma.ApplicationWhereInput = {};
-    if (status) where.status = status;
-
     const apps = await prisma.application.findMany({
-      where,
+      where: {
+        status: {
+          in: [ApplicationStatus.APPLIED, ApplicationStatus.SCREENING],
+        },
+      },
       include: {
-        job: true,
-        candidate: true,
-        assignee: true,
+        job: { select: { id: true, title: true } },
+        candidate: {
+          include: { user: true },
+        },
       },
       orderBy: { createdAt: "desc" },
     });
 
-    return res.json(apps);
-  } catch (e) {
-    next(e);
+    const result = apps.map((a) => ({
+      id: a.id,
+      status: a.status,
+      createdAt: a.createdAt,
+      job: a.job,
+      candidate: {
+        id: a.candidate.id,
+        fullName: a.candidate.fullName,
+        email: a.candidate.email,
+        photoUrl: a.candidate.photoUrl || a.candidate.user?.photoUrl || null,
+      },
+    }));
+
+    return res.json(result);
+  } catch (err) {
+    console.error("GET /applications/hr error", err);
+    return res.status(500).json({ message: "Failed to load HR applications" });
   }
 });
 
+router.get("/lead", auth, requireRole("LEAD"), async (_req, res) => {
+  try {
+    const apps = await prisma.application.findMany({
+      where: {
+        status: ApplicationStatus.INTERVIEW,
+      },
+      include: {
+        job: { select: { id: true, title: true } },
+        candidate: {
+          include: { user: true },
+        },
+      },
+      orderBy: { createdAt: "desc" },
+    });
+
+    const result = apps.map((a) => ({
+      id: a.id,
+      status: a.status,
+      createdAt: a.createdAt,
+      job: a.job,
+      candidate: {
+        id: a.candidate.id,
+        fullName: a.candidate.fullName,
+        email: a.candidate.email,
+        photoUrl: a.candidate.photoUrl || a.candidate.user?.photoUrl || null,
+      },
+    }));
+
+    return res.json(result);
+  } catch (err) {
+    console.error("GET /applications/lead error", err);
+    return res.status(500).json({ message: "Failed to load Lead applications" });
+  }
+});
 
 
 router.patch(
   "/:id/status",
   auth,
   requireRole("HR", "LEAD"),
-  async (req, res, next) => {
+  async (req, res) => {
     try {
-      const user = (req as any).user as { id: number; role: Role };
       const id = Number(req.params.id);
-      const body = updateStatusSchema.parse(req.body);
+      if (!Number.isFinite(id)) {
+        return res.status(400).json({ message: "Invalid application id" });
+      }
+
+      const parsed = updateStatusSchema.parse(req.body);
+      const user = req.user!;
+      const role = user.role as Role;
 
       const app = await prisma.application.findUnique({
         where: { id },
-        include: {
-          job: { include: { jobOwner: true } },
-        },
       });
-      if (!app) return res.status(404).json({ error: "NOT_FOUND" });
 
-      
-      if (user.role === "HR") {
-        if (!app.job.jobOwner || app.job.jobOwner.ownerId !== user.id) {
-          return res.status(403).json({ error: "FORBIDDEN" });
-        }
-      } 
-      
-      // else if (user.role === "LEAD") {
-        
-      //   if (app.assigneeId !== user.id) {
-      //     return res.status(403).json({ error: "FORBIDDEN" });
-      //   }
-      // }
-
-      let assigneeId = app.assigneeId;
-      
-      if (
-        user.role === "HR" &&
-        body.status === ApplicationStatus.INTERVIEW &&
-        body.assigneeId
-      ) {
-        assigneeId = body.assigneeId;
+      if (!app) {
+        return res.status(404).json({ message: "Application not found" });
       }
 
-      const updated = await prisma.$transaction(async (tx) => {
-        const u = await tx.application.update({
-          where: { id: app.id },
-          data: {
-            status: body.status,
-            reason: body.reason ?? app.reason,
-            assigneeId,
-          },
-          include: {
-            job: true,
-            candidate: true,
-            assignee: true,
-          },
-        });
+      const from = app.status;
+      const to = parsed.status;
 
-        await recordStatusHistory(tx, {
-          applicationId: u.id,
-          fromStatus: app.status,
-          toStatus: body.status,
-          changedById: user.id,
-          reason: body.reason,
-        });
+      let allowed = false;
+      if (role === "HR") {
+        allowed = isHrTransitionAllowed(from, to);
+      } else if (role === "LEAD") {
+        allowed = isLeadTransitionAllowed(from, to);
+      }
 
-        return u;
+      if (!allowed) {
+        return res.status(403).json({
+          message: "This status transition is not allowed for your role.",
+        });
+      }
+
+      const updated = await prisma.application.update({
+        where: { id },
+        data: {
+          status: to,
+        },
+      });
+
+      await recordStatusHistory(prisma, {
+        applicationId: updated.id,
+        fromStatus: from,
+        toStatus: to,
+        changedById: user.id,
+        reason: parsed.reason ?? null,
       });
 
       return res.json(updated);
-    } catch (e) {
-      next(e);
+    } catch (err: any) {
+      console.error("PATCH /applications/:id/status error", err);
+      if (err instanceof z.ZodError) {
+        return res.status(400).json({ message: err.message });
+      }
+      return res.status(500).json({ message: "Failed to update status" });
     }
   }
 );
