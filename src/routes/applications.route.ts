@@ -1,5 +1,4 @@
-import { Router } from "express";
-
+import { Router, Request, Response, NextFunction } from "express";
 import {
   PrismaClient,
   Prisma,
@@ -14,8 +13,6 @@ import { recordStatusHistory } from "../utils/statusHistory";
 const prisma = new PrismaClient();
 const router = Router();
 
-
-
 function parseStatus(q?: string): ApplicationStatus | undefined {
   if (!q) return undefined;
   if ((Object.values(ApplicationStatus) as string[]).includes(q)) {
@@ -24,17 +21,14 @@ function parseStatus(q?: string): ApplicationStatus | undefined {
   return undefined;
 }
 
-
-
 const applySchema = z.object({
   jobId: z.number().int().positive(),
-
   reason: z.string().max(1000).optional(),
 });
 
 const updateStatusSchema = z.object({
   status: z.nativeEnum(ApplicationStatus),
-  assigneeId: z.number().int().positive().optional(), 
+  assigneeId: z.number().int().positive().optional(),
   reason: z.string().max(1000).optional(),
 });
 
@@ -44,7 +38,6 @@ router.post("/", auth, requireRole("CANDIDATE"), async (req, res, next) => {
     const user = (req as any).user as { id: number; role: Role };
     const body = applySchema.parse(req.body);
 
-  
     const candidate = await prisma.candidate.findUnique({
       where: { userId: user.id },
     });
@@ -90,7 +83,11 @@ router.post("/", auth, requireRole("CANDIDATE"), async (req, res, next) => {
 });
 
 
-router.get("/mine", auth, requireRole("CANDIDATE"), async (req, res, next) => {
+async function getMyApplications(
+  req: Request,
+  res: Response,
+  next: NextFunction
+) {
   try {
     const user = (req as any).user as { id: number; role: Role };
 
@@ -115,14 +112,17 @@ router.get("/mine", auth, requireRole("CANDIDATE"), async (req, res, next) => {
   } catch (e) {
     next(e);
   }
-});
+}
+
+
+router.get("/me", auth, requireRole("CANDIDATE"), getMyApplications);
+router.get("/mine", auth, requireRole("CANDIDATE"), getMyApplications);
 
 
 router.get("/hr", auth, requireRole("HR"), async (req, res, next) => {
   try {
     const user = (req as any).user as { id: number; role: Role };
     const status = parseStatus(req.query.status as string | undefined);
-
 
     const ownerships = await prisma.jobOwner.findMany({
       where: { ownerId: user.id },
@@ -155,12 +155,9 @@ router.get("/hr", auth, requireRole("HR"), async (req, res, next) => {
 
 router.get("/lead", auth, requireRole("LEAD"), async (req, res, next) => {
   try {
-    const user = (req as any).user as { id: number; role: Role };
     const status = parseStatus(req.query.status as string | undefined);
 
-    const where: Prisma.ApplicationWhereInput = {
-      assigneeId: user.id,
-    };
+    const where: Prisma.ApplicationWhereInput = {};
     if (status) where.status = status;
 
     const apps = await prisma.application.findMany({
@@ -178,6 +175,7 @@ router.get("/lead", auth, requireRole("LEAD"), async (req, res, next) => {
     next(e);
   }
 });
+
 
 
 router.patch(
@@ -198,18 +196,22 @@ router.patch(
       });
       if (!app) return res.status(404).json({ error: "NOT_FOUND" });
 
-    
+      
       if (user.role === "HR") {
         if (!app.job.jobOwner || app.job.jobOwner.ownerId !== user.id) {
           return res.status(403).json({ error: "FORBIDDEN" });
         }
-      } else if (user.role === "LEAD") {
-        if (app.assigneeId !== user.id) {
-          return res.status(403).json({ error: "FORBIDDEN" });
-        }
-      }
+      } 
+      
+      // else if (user.role === "LEAD") {
+        
+      //   if (app.assigneeId !== user.id) {
+      //     return res.status(403).json({ error: "FORBIDDEN" });
+      //   }
+      // }
 
       let assigneeId = app.assigneeId;
+      
       if (
         user.role === "HR" &&
         body.status === ApplicationStatus.INTERVIEW &&
