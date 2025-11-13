@@ -13,6 +13,7 @@ const registerSchema=z.object({
   email:z.string().email(),
   password:z.string().min(6),
   name:z.string().optional(),
+  photoUrl: z.string().url().optional(), 
   phone:z.string().optional(),
   resumeUrl:z.string().url().optional(),
   linkedinUrl:z.string().url().optional(),
@@ -21,11 +22,26 @@ const registerSchema=z.object({
 
 router.post("/register", validate(registerSchema), async (req, res, next) => {
   try {
-    const {email,password,name,phone,resumeUrl,linkedinUrl,portfolioUrl}=req.body;
+    const {
+      email,
+      password,
+      name,
+      photoUrl,
+      phone,
+      resumeUrl,
+      linkedinUrl,
+      portfolioUrl}=req.body;
+
     const passwordHash=await bcrypt.hash(password, 10);
 
     const user = await prisma.user.create({
-      data:{email,passwordHash,name,role:Role.CANDIDATE },
+      data:{
+        email,
+        passwordHash,
+        name,
+        role:Role.CANDIDATE,
+      photoUrl: photoUrl ?? null
+     },
     });
 
     await prisma.candidate.create({
@@ -37,6 +53,7 @@ router.post("/register", validate(registerSchema), async (req, res, next) => {
         resumeUrl,
         linkedinUrl,
         portfolioUrl,
+        photoUrl: photoUrl ?? null, 
       },
     });
 
