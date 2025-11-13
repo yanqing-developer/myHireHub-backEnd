@@ -121,19 +121,9 @@ router.get("/mine", auth, requireRole("CANDIDATE"), getMyApplications);
 
 router.get("/hr", auth, requireRole("HR"), async (req, res, next) => {
   try {
-    const user = (req as any).user as { id: number; role: Role };
     const status = parseStatus(req.query.status as string | undefined);
 
-    const ownerships = await prisma.jobOwner.findMany({
-      where: { ownerId: user.id },
-      select: { jobId: true },
-    });
-    const jobIds = ownerships.map((o) => o.jobId);
-    if (jobIds.length === 0) return res.json([]);
-
-    const where: Prisma.ApplicationWhereInput = {
-      jobId: { in: jobIds },
-    };
+    const where: Prisma.ApplicationWhereInput = {};
     if (status) where.status = status;
 
     const apps = await prisma.application.findMany({
@@ -151,6 +141,7 @@ router.get("/hr", auth, requireRole("HR"), async (req, res, next) => {
     next(e);
   }
 });
+
 
 
 router.get("/lead", auth, requireRole("LEAD"), async (req, res, next) => {
